@@ -1,342 +1,139 @@
 `timescale 1ns / 1ps
+
 module cpu(
-    input clk, reset
-);
+    input clk, reset,
+    output pc
+    );
+localparam LITERAL_SIZE = 10;
+localparam COP_SIZE = 4;
 
-localparam 
-    CMD_SIZE = 19,
-    PROG_SIZE = 32,
-    PROG_ADDR_SIZE = $clog2(PROG_SIZE),
-    WORD_SIZE = 10,
-    RF_SIZE = 16,
-    RF_ADDR_SIZE = $clog2(RF_SIZE),
-    DATA_MEM_SIZE = 32,
-    DATA_MEM_ADDR_SIZE = $clog2(DATA_MEM_SIZE),
-    COP_SIZE = 4;
+localparam CMD_MEM_SIZE = 32;
+localparam CMD_ADDR_SIZE = $clog2(CMD_MEM_SIZE);
+localparam CMD_SIZE = 19;
 
+localparam MEM_SIZE = 32;
+localparam MEM_ADDR_SIZE = $clog2(MEM_SIZE);
+localparam MEM_DATA_SIZE = LITERAL_SIZE;
 
-localparam
-    NOP = 0,
-    LTM = 1, 
-    RTR = 3, 
-    MTR = 2, 
-    JL = 4, 
-    SUMM = 6, 
-    SBT = 5,
-    MTRD = 7,
-    RTM = 8,
-    JMP = 9;
+localparam RF_SIZE = 16;
+localparam RF_ADDR_SIZE = $clog2(RF_SIZE);
+localparam RF_DATA_SIZE = LITERAL_SIZE;
 
-reg [CMD_SIZE  - 1 : 0] Prog     [0 : PROG_SIZE     - 1];
-reg signed [WORD_SIZE - 1 : 0] DATA_MEM [0 : DATA_MEM_SIZE - 1];
-reg signed [WORD_SIZE - 1 : 0] RF       [0 : RF_SIZE       - 1];
+localparam NOP = 0, LTM = 1, MTR = 2, RTR = 3, JL = 4, SUB = 5, SUM = 6, MTRK = 7, RTM = 8, JMP = 9, DIV = 10;
 
-reg [PROG_ADDR_SIZE -1 : 0] pc, pc_next;
-reg [CMD_SIZE - 1 : 0] cmd_0, cmd_0_next;
-reg [CMD_SIZE - 1 : 0] cmd_1, cmd_1_next;
-reg [CMD_SIZE - 1 : 0] cmd_2, cmd_2_next;
-reg [CMD_SIZE - 1 : 0] cmd_3, cmd_3_next;
+reg [CMD_SIZE       -1:0] cmd_mem [0:CMD_MEM_SIZE-1];
+reg [MEM_DATA_SIZE  -1:0] mem [0:MEM_SIZE-1];
+reg [RF_DATA_SIZE   -1:0] RF [0:RF_SIZE-1];
+reg [CMD_ADDR_SIZE  -1:0] pc;
+reg [CMD_SIZE       -1:0] cmd_reg;
+reg [LITERAL_SIZE   -1:0] opA, opB;
+reg [2*LITERAL_SIZE -1:0] res;
 
-reg signed [WORD_SIZE - 1 : 0] opA_1, opA_1_next;
-reg signed [WORD_SIZE - 1 : 0] opA_2, opA_2_next;
-
-reg signed [WORD_SIZE - 1 : 0] opB_2, opB_2_next;
-reg signed [2*WORD_SIZE - 1 : 0] res, res_next;
-
-
-reg [WORD_SIZE          - 1 : 0] RF_data;
-reg [RF_ADDR_SIZE       - 1 : 0] RF_addr;
-reg [WORD_SIZE          - 1 : 0] DATA_MEM_data;
-reg [DATA_MEM_ADDR_SIZE - 1 : 0] DATA_MEM_addr;
-reg DATA_MEM_en;
-reg RF_en;
-
+`define hi 2*LITERAL_SIZE-1 -: LITERAL_SIZE
+`define lo LITERAL_SIZE - 1: 0
+reg [2:0] stage_counter;
 
 integer i;
 initial
 begin
-    for(i = 0; i < DATA_MEM_SIZE; i = i + 1)
-        DATA_MEM[i] = 0;
+    for(i = 0; i < MEM_SIZE; i = i + 1)
+        mem[i] = 0;
     for(i = 0; i < RF_SIZE; i = i + 1)
         RF[i] = 0;
     RF[1] = 1;
     
-    $readmemb("cmd_mem.mem", Prog);
+    $readmemb("cmd_mem.mem", cmd_mem);
 end
 
-
-
-//------------------------------
-// Fetch
-//------------------------------
-always@(posedge clk)
-    if(reset)
-        cmd_0 <= 0;
-    else
-        cmd_0 <= cmd_0_next;
-
-always@*
-    if(will_jmp)
-        cmd_0_next <= NOP;
-    else
-        cmd_0_next <= Prog[pc];
-
-//------------------------------
-// Decode 1
-//------------------------------
-
-wire [COP_SIZE           - 1 : 0] cop_1 = cmd_0[CMD_SIZE - 1 -: COP_SIZE];
-wire [DATA_MEM_ADDR_SIZE - 1 : 0] adr_m_1_1 = cmd_0[CMD_SIZE - 1 - COP_SIZE -: DATA_MEM_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_1_1 = cmd_0[CMD_SIZE - 1 - COP_SIZE -: RF_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_2_1 = cmd_0[CMD_SIZE - 1 - COP_SIZE  - RF_ADDR_SIZE -: RF_ADDR_SIZE];
-
-wire [RF_ADDR_SIZE       - 1 : 0] adr_r_1_1_MTR     = cmd_0[CMD_SIZE-1 - COP_SIZE - DATA_MEM_ADDR_SIZE -: RF_ADDR_SIZE];
+wire [COP_SIZE-1:0] cop                 = cmd_reg[CMD_SIZE-1 -: COP_SIZE];
+wire [RF_ADDR_SIZE-1:0] addr_m_1        = cmd_reg[CMD_SIZE-1 - COP_SIZE -: MEM_ADDR_SIZE];
+wire [RF_ADDR_SIZE-1:0] addr_r_1        = cmd_reg[CMD_SIZE-1 - COP_SIZE -: RF_ADDR_SIZE];
+wire [RF_ADDR_SIZE-1:0] addr_r_1_MTR    = cmd_reg[CMD_SIZE-1 - COP_SIZE - MEM_ADDR_SIZE -: RF_ADDR_SIZE];
+wire [RF_ADDR_SIZE-1:0] addr_r_2        = cmd_reg[CMD_SIZE-1 - COP_SIZE - RF_ADDR_SIZE -: RF_ADDR_SIZE];
+wire [RF_ADDR_SIZE-1:0] addr_r_3        = cmd_reg[CMD_SIZE-1 - COP_SIZE - 2*RF_ADDR_SIZE -: RF_ADDR_SIZE];
+wire [LITERAL_SIZE-1:0] literal         = cmd_reg[LITERAL_SIZE-1:0];
+wire [CMD_ADDR_SIZE-1:0] addr_to_jmp    = cmd_reg[CMD_ADDR_SIZE-1:0];
 
 always@(posedge clk)
-    if(reset)
-        cmd_1 <= 0;
+    if(reset || stage_counter == 4)
+        stage_counter <= 0;
     else
-        cmd_1 <= cmd_1_next;
-
-always@*
-    if(will_jmp)
-        cmd_1_next <= NOP;
-    else
-        cmd_1_next <= cmd_0;
-
-
-always@(posedge clk)
-    if(reset)
-        opA_1 <= 0;
-    else
-        opA_1 <= opA_1_next;
-
-always@*
-    case(cop_1)
-        MTR: 
-            if(DATA_MEM_en && DATA_MEM_addr == adr_m_1_1) 
-                opA_1_next <= DATA_MEM_data; 
-            else 
-                opA_1_next <= DATA_MEM[adr_m_1_1];
-        RTR, RTM: 
-            if(RF_en && RF_addr == adr_r_2_1)
-                opA_1_next <= RF_data; 
-            else 
-                opA_1_next <= RF[adr_r_2_1];
-        MTRD, JL, SBT, SUMM: 
-            if(RF_en && RF_addr == adr_r_1_1) 
-                opA_1_next <= RF_data; 
-            else 
-                opA_1_next <= RF[adr_r_1_1];       
-        default: opA_1_next <= opA_1;
-    endcase 
-
-//------------------------------
-// Decode 2
-//------------------------------
-
-wire [COP_SIZE           - 1 : 0] cop_2 = cmd_1[CMD_SIZE - 1 -: COP_SIZE];
-wire [DATA_MEM_ADDR_SIZE - 1 : 0] adr_m_1_2 = cmd_1[CMD_SIZE - 1 - COP_SIZE -: DATA_MEM_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_1_2 = cmd_1[CMD_SIZE - 1 - COP_SIZE -: RF_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_2_2 = cmd_1[CMD_SIZE - 1 - COP_SIZE  - RF_ADDR_SIZE -: RF_ADDR_SIZE];
-
-always@(posedge clk)
-    if(reset)
-        cmd_2 <= 0;
-    else
-        cmd_2 <= cmd_2_next;
-
-always@*
-    if(will_jmp)
-        cmd_2_next <= NOP;
-    else
-        cmd_2_next <= cmd_1;
-
-
-always@(posedge clk)
-    if(reset)
-        opA_2 <= 0;
-    else
-        opA_2 <= opA_2_next;
-
-always@*
-    opA_2_next <= opA_1; 
-
-
-always@(posedge clk)
-    if(reset)
-        opB_2 <= 0;
-    else
-        opB_2 <= opB_2_next;
-
-always@*
-    case(cop_2)
-        JL, SBT, SUMM: 
-            if(RF_en && RF_addr == adr_r_2_2) 
-                opB_2_next <= RF_data; 
-            else 
-                opB_2_next <= RF[adr_r_2_2];
-        MTRD:
-            if(DATA_MEM_en && DATA_MEM_addr == opA_1) 
-                opB_2_next <= DATA_MEM_data; 
-            else
-                opB_2_next <= DATA_MEM[opA_1];
-        RTM: 
-            if(RF_en && RF_addr == adr_r_1_2) 
-                opB_2_next <= RF_data; 
-            else 
-                opB_2_next <= RF[adr_r_1_2];
-        default: opB_2_next <= opB_2;
-    endcase 
-
-//------------------------------
-// Execute
-//------------------------------
-
-wire [COP_SIZE           - 1 : 0] cop_3 = cmd_2[CMD_SIZE - 1 -: COP_SIZE];
-wire [DATA_MEM_ADDR_SIZE - 1 : 0] adr_m_1_3 = cmd_2[CMD_SIZE - 1 - COP_SIZE -: DATA_MEM_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_1_3 = cmd_2[CMD_SIZE - 1 - COP_SIZE -: RF_ADDR_SIZE];
-wire [RF_ADDR_SIZE - 1 : 0] adr_r_2_3 = cmd_2[CMD_SIZE - 1 - COP_SIZE  - RF_ADDR_SIZE -: RF_ADDR_SIZE];
-
-always@(posedge clk)
-    if(reset)
-        cmd_3 <= 0;
-    else
-        cmd_3 <= cmd_3_next;
-
-always@*
-    if(will_jmp)
-        cmd_3_next <= NOP;
-    else
-        cmd_3_next <= cmd_2;
-
-
-always@(posedge clk)
-    if(reset)
-        res <= 0;
-    else
-        res <= res_next;
-
-always@*
-    case(cop_3)
-        MTR, RTR: res_next <= opA_2;
-        JL: res_next <= opA_2 < opB_2;
-        SBT: res_next <= opA_2 - opB_2;
-        SUMM: res_next <= opA_2 + opB_2;
-        MTRD: res_next <= opB_2;
-        RTM: res_next <= {opA_2, opB_2};
-        default: res_next <= res;
-    endcase
+        stage_counter <= stage_counter + 1;
     
-//------------------------------
-// WB
-//------------------------------
-
-wire [COP_SIZE           - 1 : 0] cop_4         = cmd_3[CMD_SIZE       - 1 -: COP_SIZE];
-wire [DATA_MEM_ADDR_SIZE - 1 : 0] adr_m_1_4     = cmd_3[CMD_SIZE       - 1 - COP_SIZE -: DATA_MEM_ADDR_SIZE];
-wire [RF_ADDR_SIZE       - 1 : 0] adr_r_1_4     = cmd_3[CMD_SIZE       - 1 - COP_SIZE -: RF_ADDR_SIZE];
-wire [RF_ADDR_SIZE       - 1 : 0] adr_r_2_4     = cmd_3[CMD_SIZE       - 1 - COP_SIZE  - RF_ADDR_SIZE -: RF_ADDR_SIZE];
-wire [RF_ADDR_SIZE       - 1 : 0] adr_r_3_4     = cmd_3[CMD_SIZE       - 1 - COP_SIZE  - 2*RF_ADDR_SIZE -: RF_ADDR_SIZE];
-wire signed [WORD_SIZE          - 1 : 0]   literal     = cmd_3[WORD_SIZE      - 1 : 0];
-wire [PROG_ADDR_SIZE     - 1 : 0] adr_to_jmp    = cmd_3[DATA_MEM_ADDR_SIZE-1:0];
-wire [PROG_ADDR_SIZE     - 1 : 0] adr_to_jmp_JL = cmd_3[PROG_ADDR_SIZE - 1 : 0];
-
-wire [RF_ADDR_SIZE       - 1 : 0] adr_r_1_4_MTR     = cmd_3[CMD_SIZE-1 - COP_SIZE - DATA_MEM_ADDR_SIZE -: RF_ADDR_SIZE];
-
-always@*
-    case(cop_4)
-        MTR, RTR, SBT, SUMM, MTRD: RF_data <= res;
-        default: RF_data <= 0;
-    endcase
-
-always@*
-    case(cop_4)
-        MTR : RF_addr <= adr_r_1_4_MTR;
-        RTR: RF_addr <= adr_r_1_4;
-        SBT, SUMM: RF_addr <= adr_r_3_4;
-        MTRD: RF_addr <= adr_r_2_4;
-        default: RF_addr <= 0;
-    endcase
-always@*
-    case(cop_4)
-        MTR, RTR, SBT, SUMM, MTRD: RF_en <= 1;
-        default: RF_en <= 0;
-    endcase
-
-
-
-//always @(posedge clk)
-//    if(RF_en)
-//        RF[RF_addr] <= RF_data;
-
-
-always@*
-    case(cop_4)
-        LTM: DATA_MEM_data <= literal;
-        RTM: DATA_MEM_data <= res;
-        default: DATA_MEM_data <= 0;
-    endcase
-
-always@*
-    case(cop_4)
-        LTM: DATA_MEM_addr <= adr_m_1_4;
-        RTM: DATA_MEM_addr <= res[2*WORD_SIZE - 1 -: WORD_SIZE];
-        default: DATA_MEM_addr <= 0;
-    endcase
-always@*
-    case(cop_4)
-        LTM,RTM: DATA_MEM_en <= 1;
-        default: DATA_MEM_en <= 0;
-    endcase
-
-
-always @(posedge clk)
-begin
-    if(pc==1)DATA_MEM[0] = 2;
-    if(pc==2)DATA_MEM[1] = 0;
-    if(pc==3)DATA_MEM[2] = 1;
-    if(pc==4)DATA_MEM[3] = 2;
-    if(pc==4)DATA_MEM[4] = 1;
-    if(pc==4)DATA_MEM[5] = -1;
-    if(pc==4)DATA_MEM[6] = 1;
-    if(pc==4)DATA_MEM[7] = 0;
-    if(pc==4)DATA_MEM[8] = 1;
-end
-reg [3:0] ccc= 0;
-reg fl=0;
-reg [5:0]sec=0;
-always @(posedge clk)
-begin
-    
-    if(pc==15)ccc = ccc + 1;
-    if(ccc == 3)DATA_MEM[9] =1;
-    if(DATA_MEM[3]!=0)RF[5]=2;
-    if(ccc==0&&pc==7)RF[2]=5;
-    if(ccc==0&&pc==12)RF[6]=2;
-    if(ccc==1&&pc==2)RF[4]=1;
-    if(ccc==1&&pc==5)RF[2]=2;
-    if(ccc==1&&pc==15)RF[6]=1;
-    if(ccc==2&&pc==8)RF[2]=3;
-    if(DATA_MEM[4]!=0);sec = sec+1;
-    if(sec ==31)ccc=0;
-end
-//always @(posedge clk)
-//    if(DATA_MEM_en)
-//        DATA_MEM[DATA_MEM_addr] <= DATA_MEM_data;
+always@(posedge clk)
+    if(reset)
+        cmd_reg <= {(CMD_SIZE){1'b0}};
+    else
+        if(stage_counter == 0)
+            cmd_reg <= cmd_mem[pc];
+            
+always@(posedge clk)
+    if(reset)
+        opA <= {(LITERAL_SIZE){1'b0}};
+    else
+        if(stage_counter == 1)
+            case (cop)
+                LTM: opA <= addr_m_1;
+                MTR: opA <= mem[addr_m_1];
+                RTR: opA <= RF[addr_r_2];
+                RTM: opA <= addr_r_2;
+                DIV: opA <= RF[addr_r_1];
+                JL, SUM, SUB, MTRK: opA <= RF[addr_r_1];
+            endcase
+            
+always@(posedge clk)
+    if(reset)
+        opB <= {(LITERAL_SIZE){1'b0}};
+    else
+        if(stage_counter == 2)
+            case (cop)
+                LTM: opB <= literal;
+                JL, SUM, SUB: opB <= RF[addr_r_2];
+                MTRK: opB <= mem[opA];
+                DIV: opB <= RF[addr_r_2];
+                RTM: opB <= RF[addr_r_1];
+            endcase
 
 always@(posedge clk)
     if(reset)
-        pc <= 0;
+        res <= {(2*LITERAL_SIZE){1'b0}};
     else
-        pc <= pc_next;
+        if(stage_counter == 3)
+            case (cop)
+                LTM, RTM: res <= {opA, opB};
+                MTR, RTR: res <= opA;
+                MTRK: res <= opB;
+                JL: res <= opA < opB;
+                SUB: res <= opA - opB;
+                DIV: res <= opA / opB;
+                SUM: res <= opA + opB;  
+            endcase
 
-always@*
-    case(cop_4)
-        JMP: pc_next <= adr_to_jmp;
-        JL: if(res) pc_next <= pc + 1; else pc_next <= adr_to_jmp_JL;
-        default: pc_next <= pc + 1;
-    endcase
+always@(posedge clk)
+    if(reset)
+        pc <= {(CMD_ADDR_SIZE){1'b0}};
+    else
+        if(stage_counter == 4)
+            case (cop)
+                JL: if(res == 1) pc <= pc + 1; else pc <= addr_to_jmp;
+                JMP: pc <= addr_to_jmp;
+                default: pc <= pc + 1;
+            endcase
 
-wire will_jmp = (cop_4 == JL) && (res == 5'b00000);
+always@(posedge clk)
+    if(stage_counter == 4)
+        case (cop)
+            MTR: RF[addr_r_1_MTR] <= res;
+            RTR: RF[addr_r_1] <= res;
+            SUB, SUM: RF[addr_r_3] <= res;
+            DIV: RF[addr_r_3] <= res;
+            MTRK: RF[addr_r_2] <= res;
+        endcase
+
+always@(posedge clk)
+    if(stage_counter == 4)
+        case (cop)
+            LTM, RTM: mem[res[`hi]] <= res[`lo];
+        endcase
 
 endmodule
